@@ -1,5 +1,5 @@
 {
-  "name": "LingoFlow - Spoken English AI",
+  "name": "SpeakEase",
   "description": "An interactive spoken English learning app featuring real-time AI conversation practice, pronunciation guides, and gamified lessons.",
   "requestFramePermissions": ["microphone"]
 }

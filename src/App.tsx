@@ -14,7 +14,8 @@ import {
   RotateCcw,
   X,
   Layout,
-  UserCheck
+  UserCheck,
+  AlertCircle
 } from 'lucide-react';
 import { cn } from './lib/utils';
 import { LESSONS, VOCABULARY, ROLE_PLAYS, type Lesson, type UserProgress, type Level, type RolePlay } from './types';
@@ -27,6 +28,40 @@ const stripePromise = process.env.VITE_STRIPE_PUBLISHABLE_KEY
   : null;
 
 // --- Components ---
+
+class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { hasError: boolean; error: any }> {
+  constructor(props: any) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: any) {
+    return { hasError: true, error };
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="min-h-screen flex flex-col items-center justify-center p-6 text-center bg-slate-50">
+          <div className="w-16 h-16 bg-red-100 text-red-600 rounded-full flex items-center justify-center mb-4">
+            <AlertCircle size={32} />
+          </div>
+          <h1 className="text-2xl font-bold mb-2">Something went wrong</h1>
+          <p className="text-slate-500 mb-6 max-w-xs">
+            {this.state.error?.message || "An unexpected error occurred."}
+          </p>
+          <button 
+            onClick={() => window.location.reload()}
+            className="px-8 py-3 bg-primary text-white rounded-full font-bold shadow-lg"
+          >
+            Reload App
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 const ProgressBar = ({ value, max }: { value: number; max: number }) => (
   <div className="h-2 w-full bg-slate-200 rounded-full overflow-hidden">
@@ -46,13 +81,15 @@ const Badge = ({ children, className }: { children: React.ReactNode; className?:
 
 // --- Main App ---
 
-export default function App() {
+function App() {
   const [user, setUser] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [globalError, setGlobalError] = useState<string | null>(null);
   const [view, setView] = useState<'dashboard' | 'lesson' | 'tutor' | 'flashcards' | 'roleplay' | 'subscription'>('dashboard');
   const [selectedLesson, setSelectedLesson] = useState<Lesson | null>(null);
   const [selectedRolePlay, setSelectedRolePlay] = useState<RolePlay | null>(null);
   const [isTutorActive, setIsTutorActive] = useState(false);
+  const [tutorTranscript, setTutorTranscript] = useState("");
   const [tutorService] = useState(() => new GeminiLiveService());
   
   useEffect(() => {
@@ -93,6 +130,21 @@ export default function App() {
   };
 
   const handleLogout = () => signOut(auth);
+
+  const handleFirestoreError = (error: any, operation: string, path: string) => {
+    const errInfo = {
+      error: error.message,
+      operationType: operation,
+      path,
+      authInfo: {
+        userId: auth.currentUser?.uid,
+        email: auth.currentUser?.email,
+      }
+    };
+    console.error('Firestore Error:', JSON.stringify(errInfo));
+    setGlobalError(error.message);
+    setTimeout(() => setGlobalError(null), 5000);
+  };
 
   const handleUpgrade = async () => {
     if (!user) return handleLogin();
@@ -135,7 +187,7 @@ export default function App() {
         <div className="w-20 h-20 bg-primary rounded-3xl flex items-center justify-center text-white shadow-2xl mb-8">
           <Layout size={40} />
         </div>
-        <h1 className="text-4xl font-black tracking-tight mb-4">LingoFlow</h1>
+        <h1 className="text-4xl font-black tracking-tight mb-4">SpeakEase</h1>
         <p className="text-slate-500 max-w-xs mb-12">Master spoken English with your personal AI tutor. Sign in to track your progress.</p>
         <button 
           onClick={handleLogin}
@@ -150,28 +202,36 @@ export default function App() {
 
   const addXP = async (amount: number) => {
     if (!user) return;
-    const newXP = (user.xp || 0) + amount;
-    await updateDoc(doc(db, 'users', user.uid), { xp: newXP });
-    setUser((prev: any) => ({ ...prev, xp: newXP }));
+    try {
+      const newXP = (user.xp || 0) + amount;
+      await updateDoc(doc(db, 'users', user.uid), { xp: newXP });
+      setUser((prev: any) => ({ ...prev, xp: newXP }));
+    } catch (error) {
+      handleFirestoreError(error, 'update', `users/${user.uid}`);
+    }
   };
 
   const completeLesson = async (id: string, xp: number) => {
     if (!user) return;
-    const completedLessons = user.completedLessons || [];
-    if (!completedLessons.includes(id)) {
-      const newXP = (user.xp || 0) + xp;
-      const newCompleted = [...completedLessons, id];
-      await updateDoc(doc(db, 'users', user.uid), { 
-        xp: newXP,
-        completedLessons: newCompleted
-      });
-      setUser((prev: any) => ({ 
-        ...prev, 
-        xp: newXP,
-        completedLessons: newCompleted
-      }));
+    try {
+      const completedLessons = user.completedLessons || [];
+      if (!completedLessons.includes(id)) {
+        const newXP = (user.xp || 0) + xp;
+        const newCompleted = [...completedLessons, id];
+        await updateDoc(doc(db, 'users', user.uid), { 
+          xp: newXP,
+          completedLessons: newCompleted
+        });
+        setUser((prev: any) => ({ 
+          ...prev, 
+          xp: newXP,
+          completedLessons: newCompleted
+        }));
+      }
+      setView('dashboard');
+    } catch (error) {
+      handleFirestoreError(error, 'update', `users/${user.uid}`);
     }
-    setView('dashboard');
   };
 
   return (
@@ -182,7 +242,7 @@ export default function App() {
           <div className="w-10 h-10 bg-primary rounded-xl flex items-center justify-center text-white shadow-lg shadow-primary/30">
             <Layout size={24} />
           </div>
-          <h1 className="text-xl font-bold tracking-tight">LingoFlow</h1>
+          <h1 className="text-xl font-bold tracking-tight">SpeakEase</h1>
         </div>
         <div className="flex items-center gap-4">
           <button 
@@ -511,6 +571,16 @@ export default function App() {
                 )}
               </div>
 
+              {isTutorActive && tutorTranscript && (
+                <motion.div 
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 max-w-xs mx-auto"
+                >
+                  <p className="text-sm text-slate-600 italic">"{tutorTranscript}"</p>
+                </motion.div>
+              )}
+
               <div className="space-y-4">
                 <h3 className="text-2xl font-bold">
                   {isTutorActive ? "Listening..." : "Ready to practice?"}
@@ -526,9 +596,10 @@ export default function App() {
                 <button 
                   onClick={async () => {
                     setIsTutorActive(true);
+                    setTutorTranscript("");
                     await tutorService.connect({
                       onAudioData: () => {},
-                      onTextData: (text) => console.log("Tutor:", text),
+                      onTextData: (text) => setTutorTranscript(text),
                       onError: (err) => {
                         console.error(err);
                         setIsTutorActive(false);
@@ -625,28 +696,34 @@ export default function App() {
 
       {/* Navigation Bar */}
       <nav className="fixed bottom-0 left-0 right-0 glass border-t border-slate-200 px-8 py-4 flex justify-around items-center">
-        <button 
-          onClick={() => setView('dashboard')}
-          className={cn("p-2 transition-colors", view === 'dashboard' ? "text-primary" : "text-slate-400")}
-        >
-          <Layout size={28} />
-        </button>
-        <button 
-          onClick={() => setView('tutor')}
-          className={cn("p-2 transition-colors", view === 'tutor' ? "text-primary" : "text-slate-400")}
-        >
-          <Mic2 size={28} />
-        </button>
-        <button 
-          onClick={() => setView('flashcards')}
-          className={cn("p-2 transition-colors", view === 'flashcards' ? "text-primary" : "text-slate-400")}
-        >
-          <BookOpen size={28} />
-        </button>
-        <button className="p-2 text-slate-400">
-          <Settings size={28} />
-        </button>
+        {/* ... */}
       </nav>
+
+      {/* Global Error Toast */}
+      <AnimatePresence>
+        {globalError && (
+          <motion.div
+            initial={{ opacity: 0, y: 50 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 50 }}
+            className="fixed bottom-24 left-6 right-6 bg-red-600 text-white p-4 rounded-2xl shadow-xl flex items-center gap-3 z-50"
+          >
+            <AlertCircle size={20} />
+            <p className="text-sm font-medium flex-1">{globalError}</p>
+            <button onClick={() => setGlobalError(null)}>
+              <X size={18} />
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
+  );
+}
+
+export default function AppWithErrorBoundary() {
+  return (
+    <ErrorBoundary>
+      <App />
+    </ErrorBoundary>
   );
 }

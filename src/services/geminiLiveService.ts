@@ -9,9 +9,15 @@ export class GeminiLiveService {
   private source: MediaStreamAudioSourceNode | null = null;
   private audioQueue: Int16Array[] = [];
   private isPlaying = false;
+  private nextStartTime = 0;
+  private activeSources: AudioBufferSourceNode[] = [];
 
   constructor() {
-    this.ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      console.error("GEMINI_API_KEY is missing from environment variables.");
+    }
+    this.ai = new GoogleGenAI({ apiKey: apiKey || "" });
   }
 
   async connect(callbacks: {
@@ -23,6 +29,7 @@ export class GeminiLiveService {
   }) {
     try {
       this.audioContext = new AudioContext({ sampleRate: 16000 });
+      this.nextStartTime = 0;
       
       this.session = await this.ai.live.connect({
         model: "gemini-2.5-flash-native-audio-preview-09-2025",
@@ -31,23 +38,36 @@ export class GeminiLiveService {
             console.log("Gemini Live connected");
           },
           onmessage: async (message: LiveServerMessage) => {
-            if (message.serverContent?.modelTurn?.parts[0]?.inlineData?.data) {
-              const base64Data = message.serverContent.modelTurn.parts[0].inlineData.data;
-              const audioData = this.base64ToUint8Array(base64Data);
-              const int16Data = new Int16Array(audioData.buffer);
-              callbacks.onAudioData(int16Data);
-              this.playAudio(int16Data);
-            }
-
-            if (message.serverContent?.modelTurn?.parts[0]?.text) {
-              callbacks.onTextData(message.serverContent.modelTurn.parts[0].text);
+            const parts = message.serverContent?.modelTurn?.parts;
+            if (parts) {
+              for (const part of parts) {
+                if (part.inlineData?.data) {
+                  const base64Data = part.inlineData.data;
+                  const audioData = this.base64ToUint8Array(base64Data);
+                  const int16Data = new Int16Array(audioData.buffer);
+                  callbacks.onAudioData(int16Data);
+                  this.playAudio(int16Data);
+                }
+                if (part.text) {
+                  callbacks.onTextData(part.text);
+                }
+              }
             }
 
             if (message.serverContent?.interrupted) {
               this.stopAudio();
             }
           },
-          onerror: (error) => callbacks.onError(error),
+          onerror: (error) => {
+            console.error("Gemini Live Error:", error);
+            let message = "A network error occurred while connecting to the AI tutor.";
+            if (error?.message?.includes("API key")) {
+              message = "Invalid or missing Gemini API key. Please check your settings.";
+            } else if (error?.message?.includes("Network error")) {
+              message = "Network error: Please check your internet connection.";
+            }
+            callbacks.onError(new Error(message));
+          },
           onclose: () => callbacks.onClose(),
         },
         config: {
@@ -76,7 +96,14 @@ export class GeminiLiveService {
       };
 
       this.source.connect(this.processor);
-      this.processor.connect(this.audioContext.destination);
+      const silentGain = this.audioContext.createGain();
+      silentGain.gain.value = 0;
+      this.processor.connect(silentGain);
+      silentGain.connect(this.audioContext.destination);
+
+      if (this.audioContext.state === 'suspended') {
+        await this.audioContext.resume();
+      }
 
     } catch (error) {
       callbacks.onError(error);
@@ -125,16 +152,37 @@ export class GeminiLiveService {
     const source = this.audioContext.createBufferSource();
     source.buffer = buffer;
     source.connect(this.audioContext.destination);
-    source.start();
+    
+    const now = this.audioContext.currentTime;
+    if (this.nextStartTime < now) {
+      this.nextStartTime = now + 0.05; // Small buffer
+    }
+
+    source.start(this.nextStartTime);
+    this.activeSources.push(source);
+    this.nextStartTime += buffer.duration;
+
+    source.onended = () => {
+      this.activeSources = this.activeSources.filter(s => s !== source);
+    };
   }
 
   private stopAudio() {
+    this.activeSources.forEach(source => {
+      try {
+        source.stop();
+      } catch (e) {
+        // Source might have already stopped
+      }
+    });
+    this.activeSources = [];
+    this.nextStartTime = 0;
     this.audioQueue = [];
     this.isPlaying = false;
-    // In a real implementation, you'd want to stop the current buffer source
   }
 
   disconnect() {
+    this.stopAudio();
     this.session?.close();
     this.processor?.disconnect();
     this.source?.disconnect();
