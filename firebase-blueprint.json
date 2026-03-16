@@ -1,0 +1,28 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile and subscription data",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Firebase Auth UID" },
+        "email": { "type": "string", "description": "User email" },
+        "displayName": { "type": "string", "description": "User display name" },
+        "photoURL": { "type": "string", "description": "User photo URL" },
+        "xp": { "type": "integer", "description": "Total experience points" },
+        "streak": { "type": "integer", "description": "Current daily streak" },
+        "lastActive": { "type": "string", "format": "date-time", "description": "Last activity timestamp" },
+        "completedLessons": { "type": "array", "items": { "type": "string" }, "description": "List of completed lesson IDs" },
+        "isPro": { "type": "boolean", "description": "Subscription status" },
+        "stripeCustomerId": { "type": "string", "description": "Stripe customer ID" }
+      },
+      "required": ["uid", "email"]
+    }
+  },
+  "firestore": {
+    "/users/{uid}": {
+      "schema": "User",
+      "description": "User documents"
+    }
+  }
+}

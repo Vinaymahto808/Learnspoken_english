@@ -1,0 +1,5 @@
+{
+  "name": "LingoFlow - Spoken English AI",
+  "description": "An interactive spoken English learning app featuring real-time AI conversation practice, pronunciation guides, and gamified lessons.",
+  "requestFramePermissions": ["microphone"]
+}
