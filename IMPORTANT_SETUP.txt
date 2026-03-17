@@ -1,0 +1,67 @@
+================================================================================
+  IMPORTANT: OpenAI API Key Required
+================================================================================
+
+To use SpeakEase, you MUST configure your OpenAI API key.
+
+📌 STEPS TO GET STARTED:
+
+1. Get your OpenAI API Key:
+   → Visit: https://platform.openai.com/api-keys
+   → Sign up or log in to your OpenAI account
+   → Click "Create new secret key"
+   → Copy the key (starts with sk-)
+
+2. Add the key to your .env file:
+   → Open the .env file in the project root
+   → Find the line: VITE_OPENAI_API_KEY=your-openai-api-key-here
+   → Replace "your-openai-api-key-here" with your actual key
+   → Save the file
+
+   Example:
+   VITE_OPENAI_API_KEY=sk-abc123xyz456...
+
+3. Run the app:
+   npm run dev
+
+================================================================================
+
+⚠️  WITHOUT THE API KEY, THESE FEATURES WILL NOT WORK:
+   - Speech-to-text transcription (Whisper API)
+   - AI feedback and scoring (GPT-4o-mini)
+   - AI Tutor chat functionality
+
+================================================================================
+
+💰 COST INFORMATION:
+
+OpenAI charges for API usage:
+- Whisper (Speech-to-text): ~$0.006 per minute of audio
+- GPT-4o-mini: ~$0.0003 per analysis
+
+Estimated cost per practice session: $0.006 - $0.01
+100 practice sessions: ~$0.60 - $1.00
+
+You can set spending limits in your OpenAI account dashboard.
+
+================================================================================
+
+✅ VERIFICATION:
+
+After adding your API key:
+1. Start the app: npm run dev
+2. Sign in with Google
+3. Select a lesson
+4. Record speech
+5. If you see feedback scores → API is working! ✓
+
+================================================================================
+
+📚 NEED HELP?
+
+→ Full setup guide: SETUP_GUIDE.md
+→ Quick start: QUICK_START.md
+→ Features list: FEATURES.md
+→ Deployment: DEPLOYMENT.md
+
+================================================================================
