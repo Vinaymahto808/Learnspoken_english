@@ -1,703 +1,729 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import {
-  Trophy, Flame, BookOpen, Mic2, MessageSquare, ChevronRight, Star,
-  CheckCircle2, Play, Volume2, X, Users, TrendingUp, Target, Award,
-  Home, Calendar, BarChart3, LogOut, Loader2, AlertCircle
+import { 
+  Trophy, 
+  Flame, 
+  BookOpen, 
+  Mic2, 
+  Settings, 
+  ChevronRight, 
+  Star,
+  CheckCircle2,
+  Play,
+  Volume2,
+  RotateCcw,
+  X,
+  Layout,
+  UserCheck,
+  AlertCircle
 } from 'lucide-react';
 import { cn } from './lib/utils';
-import { supabase } from './lib/supabase';
-import { LESSONS_DATA } from './data/lessons';
-import { transcribeAudio, analyzeSpeech, getChatResponse, type SpeechAnalysis } from './services/openaiService';
-import { SpeechRecorder } from './components/SpeechRecorder';
-import { ScoreDisplay } from './components/ScoreDisplay';
-import { Dashboard, LessonsView, PracticeView, ChallengeView, LeaderboardView, TutorView, AnalyticsView } from './components/Views';
-import type { Database } from './lib/database.types';
+import { LESSONS, VOCABULARY, ROLE_PLAYS, type Lesson, type UserProgress, type Level, type RolePlay } from './types';
+import { GeminiLiveService } from './services/geminiLiveService';
+import { auth, db, googleProvider, signInWithPopup, signOut, doc, getDoc, setDoc, updateDoc, onSnapshot } from './firebase';
+import { loadStripe } from '@stripe/stripe-js';
 
-type Profile = Database['public']['Tables']['profiles']['Row'];
-type Lesson = Database['public']['Tables']['lessons']['Row'];
-type UserLessonProgress = Database['public']['Tables']['user_lesson_progress']['Row'];
+const stripePromise = process.env.VITE_STRIPE_PUBLISHABLE_KEY 
+  ? loadStripe(process.env.VITE_STRIPE_PUBLISHABLE_KEY) 
+  : null;
 
-interface DailyChallenge {
-  id: string;
-  prompt: string;
-  difficulty: string;
-  category: string;
-  max_duration: number;
-  xp_reward: number;
+// --- Components ---
+
+class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { hasError: boolean; error: any }> {
+  constructor(props: any) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: any) {
+    return { hasError: true, error };
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="min-h-screen flex flex-col items-center justify-center p-6 text-center bg-slate-50">
+          <div className="w-16 h-16 bg-red-100 text-red-600 rounded-full flex items-center justify-center mb-4">
+            <AlertCircle size={32} />
+          </div>
+          <h1 className="text-2xl font-bold mb-2">Something went wrong</h1>
+          <p className="text-slate-500 mb-6 max-w-xs">
+            {this.state.error?.message || "An unexpected error occurred."}
+          </p>
+          <button 
+            onClick={() => window.location.reload()}
+            className="px-8 py-3 bg-primary text-white rounded-full font-bold shadow-lg"
+          >
+            Reload App
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
 }
 
-interface LeaderboardEntry {
-  user_id: string;
-  display_name: string;
-  avatar_url: string;
-  xp: number;
-  rank: number;
-}
+const ProgressBar = ({ value, max }: { value: number; max: number }) => (
+  <div className="h-2 w-full bg-slate-200 rounded-full overflow-hidden">
+    <motion.div 
+      initial={{ width: 0 }}
+      animate={{ width: `${(value / max) * 100}%` }}
+      className="h-full bg-primary"
+    />
+  </div>
+);
+
+const Badge = ({ children, className }: { children: React.ReactNode; className?: string }) => (
+  <span className={cn("px-2 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider", className)}>
+    {children}
+  </span>
+);
+
+// --- Main App ---
 
 function App() {
   const [user, setUser] = useState<any>(null);
-  const [profile, setProfile] = useState<Profile | null>(null);
   const [loading, setLoading] = useState(true);
-  const [view, setView] = useState<'dashboard' | 'lessons' | 'practice' | 'challenge' | 'leaderboard' | 'tutor' | 'analytics'>('dashboard');
-  const [lessons, setLessons] = useState<Lesson[]>([]);
-  const [userProgress, setUserProgress] = useState<Map<string, UserLessonProgress>>(new Map());
+  const [globalError, setGlobalError] = useState<string | null>(null);
+  const [view, setView] = useState<'dashboard' | 'lesson' | 'tutor' | 'flashcards' | 'roleplay' | 'subscription'>('dashboard');
   const [selectedLesson, setSelectedLesson] = useState<Lesson | null>(null);
-  const [dailyChallenge, setDailyChallenge] = useState<DailyChallenge | null>(null);
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [analysisResult, setAnalysisResult] = useState<SpeechAnalysis | null>(null);
-  const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
-  const [chatMessages, setChatMessages] = useState<{ role: 'user' | 'assistant'; content: string }[]>([]);
-  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
+  const [selectedRolePlay, setSelectedRolePlay] = useState<RolePlay | null>(null);
+  const [isTutorActive, setIsTutorActive] = useState(false);
+  const [tutorTranscript, setTutorTranscript] = useState("");
+  const [tutorService] = useState(() => new GeminiLiveService());
+  
   useEffect(() => {
-    initAuth();
-  }, []);
-
-  useEffect(() => {
-    if (profile) {
-      loadLessons();
-      loadDailyChallenge();
-      loadLeaderboard();
-    }
-  }, [profile]);
-
-  const initAuth = async () => {
-    try {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (session?.user) {
-        setUser(session.user);
-        await loadOrCreateProfile(session.user);
-      }
-    } catch (error) {
-      console.error('Auth error:', error);
-    } finally {
-      setLoading(false);
-    }
-
-    supabase.auth.onAuthStateChange(async (event, session) => {
-      if (session?.user) {
-        setUser(session.user);
-        await loadOrCreateProfile(session.user);
+    const unsubscribe = auth.onAuthStateChanged(async (firebaseUser) => {
+      if (firebaseUser) {
+        const userDoc = await getDoc(doc(db, 'users', firebaseUser.uid));
+        if (!userDoc.exists()) {
+          const newUser = {
+            uid: firebaseUser.uid,
+            email: firebaseUser.email,
+            displayName: firebaseUser.displayName,
+            photoURL: firebaseUser.photoURL,
+            xp: 0,
+            streak: 0,
+            lastActive: new Date().toISOString(),
+            completedLessons: [],
+            isPro: false
+          };
+          await setDoc(doc(db, 'users', firebaseUser.uid), newUser);
+          setUser(newUser);
+        } else {
+          setUser(userDoc.data());
+        }
       } else {
         setUser(null);
-        setProfile(null);
       }
+      setLoading(false);
     });
-  };
-
-  const loadOrCreateProfile = async (authUser: any) => {
-    try {
-      const { data: existingProfile, error: fetchError } = await supabase
-        .from('profiles')
-        .select('*')
-        .eq('id', authUser.id)
-        .maybeSingle();
-
-      if (fetchError) throw fetchError;
-
-      if (existingProfile) {
-        setProfile(existingProfile);
-        await supabase
-          .from('profiles')
-          .update({ last_active: new Date().toISOString() })
-          .eq('id', authUser.id);
-      } else {
-        const newProfile: Database['public']['Tables']['profiles']['Insert'] = {
-          id: authUser.id,
-          email: authUser.email!,
-          display_name: authUser.user_metadata?.full_name || authUser.email?.split('@')[0] || 'User',
-          avatar_url: authUser.user_metadata?.avatar_url || `https://ui-avatars.com/api/?name=${authUser.email?.split('@')[0]}&background=3b82f6&color=fff`
-        };
-
-        const { data: createdProfile, error: createError } = await supabase
-          .from('profiles')
-          .insert(newProfile)
-          .select()
-          .single();
-
-        if (createError) throw createError;
-        setProfile(createdProfile);
-      }
-    } catch (error: any) {
-      console.error('Profile error:', error);
-      setError(error.message);
-    }
-  };
-
-  const loadLessons = async () => {
-    try {
-      const { data: lessonsData, error: lessonsError } = await supabase
-        .from('lessons')
-        .select('*')
-        .eq('is_active', true)
-        .order('order_index');
-
-      if (lessonsError) throw lessonsError;
-
-      if (!lessonsData || lessonsData.length === 0) {
-        await seedLessons();
-        return;
-      }
-
-      setLessons(lessonsData);
-
-      if (profile) {
-        const { data: progressData, error: progressError } = await supabase
-          .from('user_lesson_progress')
-          .select('*')
-          .eq('user_id', profile.id);
-
-        if (progressError) throw progressError;
-
-        const progressMap = new Map(progressData?.map(p => [p.lesson_id, p]) || []);
-        setUserProgress(progressMap);
-      }
-    } catch (error: any) {
-      console.error('Load lessons error:', error);
-      setError(error.message);
-    }
-  };
-
-  const seedLessons = async () => {
-    try {
-      const lessonsToInsert = LESSONS_DATA.map((lesson, index) => ({
-        title: lesson.title,
-        description: lesson.description,
-        category: lesson.category,
-        difficulty: lesson.difficulty,
-        xp_reward: lesson.xp_reward,
-        transcript: lesson.transcript,
-        order_index: index,
-        is_active: true
-      }));
-
-      const { data, error } = await supabase
-        .from('lessons')
-        .insert(lessonsToInsert)
-        .select();
-
-      if (error) throw error;
-      setLessons(data || []);
-    } catch (error: any) {
-      console.error('Seed lessons error:', error);
-      setError(error.message);
-    }
-  };
-
-  const loadDailyChallenge = async () => {
-    try {
-      const today = new Date().toISOString().split('T')[0];
-      const { data, error } = await supabase
-        .from('daily_challenges')
-        .select('*')
-        .eq('active_date', today)
-        .maybeSingle();
-
-      if (error) throw error;
-
-      if (!data) {
-        await createDailyChallenge();
-      } else {
-        setDailyChallenge(data);
-      }
-    } catch (error: any) {
-      console.error('Load challenge error:', error);
-    }
-  };
-
-  const createDailyChallenge = async () => {
-    const challenges = [
-      { prompt: 'Describe your morning routine in detail', category: 'Daily Life', difficulty: 'Beginner' as const },
-      { prompt: 'Explain why learning English is important for your career', category: 'Career', difficulty: 'Intermediate' as const },
-      { prompt: 'Discuss the impact of technology on modern communication', category: 'Technology', difficulty: 'Advanced' as const },
-      { prompt: 'Tell a story about a memorable trip you took', category: 'Travel', difficulty: 'Intermediate' as const },
-      { prompt: 'Describe your dream job and why it appeals to you', category: 'Career', difficulty: 'Intermediate' as const },
-      { prompt: 'Explain a traditional festival celebrated in your region', category: 'Culture', difficulty: 'Intermediate' as const },
-      { prompt: 'Talk about a book or movie that influenced you', category: 'Entertainment', difficulty: 'Intermediate' as const },
-      { prompt: 'Describe how you handle stress and pressure', category: 'Personal Development', difficulty: 'Advanced' as const }
-    ];
-
-    const randomChallenge = challenges[Math.floor(Math.random() * challenges.length)];
-    const today = new Date().toISOString().split('T')[0];
-
-    try {
-      const { data, error } = await supabase
-        .from('daily_challenges')
-        .insert({
-          ...randomChallenge,
-          active_date: today,
-          max_duration: 90,
-          xp_reward: 50
-        })
-        .select()
-        .single();
-
-      if (error) throw error;
-      setDailyChallenge(data);
-    } catch (error: any) {
-      console.error('Create challenge error:', error);
-    }
-  };
-
-  const loadLeaderboard = async () => {
-    try {
-      const { data, error } = await supabase
-        .from('profiles')
-        .select('id, display_name, avatar_url, xp')
-        .order('xp', { ascending: false })
-        .limit(20);
-
-      if (error) throw error;
-
-      const leaderboardData = data?.map((entry, index) => ({
-        user_id: entry.id,
-        display_name: entry.display_name || 'User',
-        avatar_url: entry.avatar_url || '',
-        xp: entry.xp,
-        rank: index + 1
-      })) || [];
-
-      setLeaderboard(leaderboardData);
-    } catch (error: any) {
-      console.error('Load leaderboard error:', error);
-    }
-  };
+    return () => unsubscribe();
+  }, []);
 
   const handleLogin = async () => {
     try {
-      const { error } = await supabase.auth.signInWithOAuth({
-        provider: 'google',
-        options: {
-          redirectTo: window.location.origin
-        }
-      });
-      if (error) throw error;
-    } catch (error: any) {
-      console.error('Login error:', error);
-      setError(error.message);
+      await signInWithPopup(auth, googleProvider);
+    } catch (error) {
+      console.error("Login failed", error);
     }
   };
 
-  const handleLogout = async () => {
-    await supabase.auth.signOut();
-    setView('dashboard');
+  const handleLogout = () => signOut(auth);
+
+  const handleFirestoreError = (error: any, operation: string, path: string) => {
+    const errInfo = {
+      error: error.message,
+      operationType: operation,
+      path,
+      authInfo: {
+        userId: auth.currentUser?.uid,
+        email: auth.currentUser?.email,
+      }
+    };
+    console.error('Firestore Error:', JSON.stringify(errInfo));
+    setGlobalError(error.message);
+    setTimeout(() => setGlobalError(null), 5000);
   };
 
-  const handleRecordingComplete = async (audioBlob: Blob) => {
-    if (!profile) return;
-
-    setIsProcessing(true);
-    setError(null);
-
+  const handleUpgrade = async () => {
+    if (!user) return handleLogin();
+    
     try {
-      const transcription = await transcribeAudio(audioBlob);
-      const expectedText = selectedLesson?.transcript || dailyChallenge?.prompt || '';
-      const analysis = await analyzeSpeech(transcription, expectedText, selectedLesson ? 'lesson' : 'challenge');
-
-      setAnalysisResult(analysis);
-
-      const { error: submissionError } = await supabase
-        .from('speech_submissions')
-        .insert({
-          user_id: profile.id,
-          lesson_id: selectedLesson?.id,
-          transcription: analysis.transcription,
-          score: analysis.overallScore,
-          pronunciation_score: analysis.pronunciationScore,
-          grammar_score: analysis.grammarScore,
-          fluency_score: analysis.fluencyScore,
-          vocabulary_score: analysis.vocabularyScore,
-          feedback: analysis.feedback,
-          analysis: analysis.detailedFeedback as any
-        });
-
-      if (submissionError) throw submissionError;
-
-      const xpGained = selectedLesson?.xp_reward || dailyChallenge?.xp_reward || 0;
-      await updateXP(xpGained);
-
-      if (selectedLesson && analysis.overallScore >= 70) {
-        await markLessonComplete(selectedLesson.id, analysis.overallScore);
-      }
-
-      if (dailyChallenge && view === 'challenge') {
-        await supabase
-          .from('user_challenges')
-          .insert({
-            user_id: profile.id,
-            challenge_id: dailyChallenge.id,
-            score: analysis.overallScore,
-            transcription: analysis.transcription,
-            feedback: analysis.feedback
-          });
-      }
-
-    } catch (error: any) {
-      console.error('Processing error:', error);
-      setError(error.message);
-    } finally {
-      setIsProcessing(false);
-    }
-  };
-
-  const updateXP = async (amount: number) => {
-    if (!profile) return;
-
-    const newXP = profile.xp + amount;
-    const newLevel = Math.floor(newXP / 500) + 1;
-
-    const { error } = await supabase
-      .from('profiles')
-      .update({ xp: newXP, level: newLevel })
-      .eq('id', profile.id);
-
-    if (!error) {
-      setProfile({ ...profile, xp: newXP, level: newLevel });
-    }
-  };
-
-  const markLessonComplete = async (lessonId: string, score: number) => {
-    if (!profile) return;
-
-    const existingProgress = userProgress.get(lessonId);
-
-    if (existingProgress) {
-      const { data, error } = await supabase
-        .from('user_lesson_progress')
-        .update({
-          status: 'completed',
-          score: Math.max(score, existingProgress.score),
-          attempts: existingProgress.attempts + 1,
-          completed_at: new Date().toISOString()
+      const response = await fetch('/api/create-checkout-session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          priceId: 'price_H5ggY9q12345', // Placeholder
+          userId: user.uid,
+          email: user.email
         })
-        .eq('id', existingProgress.id)
-        .select()
-        .single();
-
-      if (!error && data) {
-        userProgress.set(lessonId, data);
-        setUserProgress(new Map(userProgress));
-      }
-    } else {
-      const { data, error } = await supabase
-        .from('user_lesson_progress')
-        .insert({
-          user_id: profile.id,
-          lesson_id: lessonId,
-          status: 'completed',
-          score,
-          attempts: 1,
-          completed_at: new Date().toISOString()
-        })
-        .select()
-        .single();
-
-      if (!error && data) {
-        userProgress.set(lessonId, data);
-        setUserProgress(new Map(userProgress));
-      }
-    }
-
-    await supabase
-      .from('profiles')
-      .update({ total_lessons_completed: profile.total_lessons_completed + 1 })
-      .eq('id', profile.id);
-  };
-
-  const startChatSession = async () => {
-    if (!profile) return;
-
-    const { data, error } = await supabase
-      .from('chat_sessions')
-      .insert({ user_id: profile.id })
-      .select()
-      .single();
-
-    if (!error && data) {
-      setCurrentSessionId(data.id);
-      setChatMessages([{
-        role: 'assistant',
-        content: 'Hello! I\'m Alex, your English tutor. What would you like to practice today?'
-      }]);
-    }
-  };
-
-  const sendChatMessage = async (userMessage: string) => {
-    if (!currentSessionId || !profile) return;
-
-    const newMessages = [...chatMessages, { role: 'user' as const, content: userMessage }];
-    setChatMessages(newMessages);
-
-    await supabase
-      .from('chat_messages')
-      .insert({
-        session_id: currentSessionId,
-        role: 'user',
-        content: userMessage
       });
-
-    try {
-      const response = await getChatResponse(newMessages);
-      const updatedMessages = [...newMessages, { role: 'assistant' as const, content: response }];
-      setChatMessages(updatedMessages);
-
-      await supabase
-        .from('chat_messages')
-        .insert({
-          session_id: currentSessionId,
-          role: 'assistant',
-          content: response
-        });
-
-      await supabase
-        .from('chat_sessions')
-        .update({ message_count: updatedMessages.length })
-        .eq('id', currentSessionId);
-
-    } catch (error: any) {
-      console.error('Chat error:', error);
-      setError(error.message);
+      const session = await response.json();
+      const stripe = await stripePromise;
+      if (stripe) {
+        await (stripe as any).redirectToCheckout({ sessionId: session.id });
+      }
+    } catch (error) {
+      console.error("Checkout failed", error);
     }
   };
 
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-slate-50">
-        <Loader2 className="w-12 h-12 text-primary animate-spin" />
+        <motion.div 
+          animate={{ rotate: 360 }}
+          transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
+          className="w-12 h-12 border-4 border-primary border-t-transparent rounded-full"
+        />
       </div>
     );
   }
 
   if (!user) {
     return (
-      <div className="min-h-screen flex flex-col items-center justify-center bg-gradient-to-br from-blue-50 via-white to-indigo-50 p-6">
-        <motion.div
-          initial={{ scale: 0 }}
-          animate={{ scale: 1 }}
-          className="text-center space-y-8"
+      <div className="min-h-screen flex flex-col items-center justify-center bg-slate-50 p-6 text-center">
+        <div className="w-20 h-20 bg-primary rounded-3xl flex items-center justify-center text-white shadow-2xl mb-8">
+          <Layout size={40} />
+        </div>
+        <h1 className="text-4xl font-black tracking-tight mb-4">SpeakEase</h1>
+        <p className="text-slate-500 max-w-xs mb-12">Master spoken English with your personal AI tutor. Sign in to track your progress.</p>
+        <button 
+          onClick={handleLogin}
+          className="w-full max-w-xs py-4 bg-white border border-slate-200 rounded-2xl font-bold flex items-center justify-center gap-3 hover:bg-slate-50 transition-colors shadow-sm"
         >
-          <div className="w-24 h-24 bg-primary rounded-3xl flex items-center justify-center text-white shadow-2xl mx-auto">
-            <Mic2 size={48} />
-          </div>
-          <div>
-            <h1 className="text-5xl font-black tracking-tight mb-4">SpeakEase</h1>
-            <p className="text-xl text-slate-600 max-w-md">Master Spoken English with AI-Powered Practice</p>
-          </div>
-          <div className="space-y-4">
-            <button
-              onClick={handleLogin}
-              className="w-full max-w-sm py-4 px-8 bg-white border-2 border-slate-200 rounded-2xl font-bold flex items-center justify-center gap-3 hover:bg-slate-50 transition-all shadow-lg"
-            >
-              <img src="https://www.google.com/favicon.ico" className="w-6 h-6" alt="Google" />
-              Continue with Google
-            </button>
-          </div>
-          <div className="grid grid-cols-3 gap-4 max-w-xl pt-8">
-            <div className="text-center">
-              <div className="text-3xl font-black text-primary">50+</div>
-              <div className="text-sm text-slate-500">Lessons</div>
-            </div>
-            <div className="text-center">
-              <div className="text-3xl font-black text-primary">AI</div>
-              <div className="text-sm text-slate-500">Feedback</div>
-            </div>
-            <div className="text-center">
-              <div className="text-3xl font-black text-primary">24/7</div>
-              <div className="text-sm text-slate-500">Practice</div>
-            </div>
-          </div>
-        </motion.div>
+          <img src="https://www.google.com/favicon.ico" className="w-5 h-5" alt="Google" />
+          Continue with Google
+        </button>
       </div>
     );
   }
 
-  // Continue in next part...
-  return <MainApp
-    profile={profile}
-    view={view}
-    setView={setView}
-    lessons={lessons}
-    userProgress={userProgress}
-    selectedLesson={selectedLesson}
-    setSelectedLesson={setSelectedLesson}
-    dailyChallenge={dailyChallenge}
-    isProcessing={isProcessing}
-    analysisResult={analysisResult}
-    setAnalysisResult={setAnalysisResult}
-    leaderboard={leaderboard}
-    chatMessages={chatMessages}
-    currentSessionId={currentSessionId}
-    handleRecordingComplete={handleRecordingComplete}
-    startChatSession={startChatSession}
-    sendChatMessage={sendChatMessage}
-    handleLogout={handleLogout}
-    error={error}
-    setError={setError}
-  />;
-}
+  const addXP = async (amount: number) => {
+    if (!user) return;
+    try {
+      const newXP = (user.xp || 0) + amount;
+      await updateDoc(doc(db, 'users', user.uid), { xp: newXP });
+      setUser((prev: any) => ({ ...prev, xp: newXP }));
+    } catch (error) {
+      handleFirestoreError(error, 'update', `users/${user.uid}`);
+    }
+  };
 
-// Split into separate component for better organization
-function MainApp({ profile, view, setView, lessons, userProgress, selectedLesson, setSelectedLesson, dailyChallenge, isProcessing, analysisResult, setAnalysisResult, leaderboard, chatMessages, currentSessionId, handleRecordingComplete, startChatSession, sendChatMessage, handleLogout, error, setError }: any) {
-  const [chatInput, setChatInput] = useState('');
-
-  const completedLessons = Array.from(userProgress.values()).filter(p => p.status === 'completed').length;
-  const totalLessons = lessons.length;
-  const averageScore = Array.from(userProgress.values()).reduce((acc, p) => acc + p.score, 0) / (completedLessons || 1);
+  const completeLesson = async (id: string, xp: number) => {
+    if (!user) return;
+    try {
+      const completedLessons = user.completedLessons || [];
+      if (!completedLessons.includes(id)) {
+        const newXP = (user.xp || 0) + xp;
+        const newCompleted = [...completedLessons, id];
+        await updateDoc(doc(db, 'users', user.uid), { 
+          xp: newXP,
+          completedLessons: newCompleted
+        });
+        setUser((prev: any) => ({ 
+          ...prev, 
+          xp: newXP,
+          completedLessons: newCompleted
+        }));
+      }
+      setView('dashboard');
+    } catch (error) {
+      handleFirestoreError(error, 'update', `users/${user.uid}`);
+    }
+  };
 
   return (
-    <div className="min-h-screen bg-slate-50 pb-24">
-      <header className="sticky top-0 z-50 glass px-6 py-4">
-        <div className="max-w-6xl mx-auto flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-primary rounded-xl flex items-center justify-center text-white shadow-lg">
-              <Mic2 size={24} />
-            </div>
-            <div>
-              <h1 className="text-xl font-bold">SpeakEase</h1>
-              <p className="text-xs text-slate-500">Level {profile?.level}</p>
-            </div>
+    <div className="min-h-screen bg-slate-50 font-sans text-slate-900 pb-24">
+      {/* Header */}
+      <header className="sticky top-0 z-50 glass px-6 py-4 flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <div className="w-10 h-10 bg-primary rounded-xl flex items-center justify-center text-white shadow-lg shadow-primary/30">
+            <Layout size={24} />
           </div>
-          <div className="flex items-center gap-4">
-            <div className="flex items-center gap-2 bg-orange-50 text-orange-600 px-3 py-1.5 rounded-full font-bold text-sm">
-              <Flame size={18} fill="currentColor" />
-              {profile?.streak || 0}
-            </div>
-            <div className="flex items-center gap-2 bg-blue-50 text-blue-600 px-3 py-1.5 rounded-full font-bold text-sm">
-              <Trophy size={18} />
-              {profile?.xp || 0} XP
-            </div>
-            <button onClick={handleLogout} className="p-2 hover:bg-slate-100 rounded-full transition-colors">
-              <LogOut size={20} />
-            </button>
+          <h1 className="text-xl font-bold tracking-tight">SpeakEase</h1>
+        </div>
+        <div className="flex items-center gap-4">
+          <button 
+            onClick={() => setView('subscription')}
+            className={cn(
+              "px-3 py-1.5 rounded-full font-bold text-xs",
+              user.isPro ? "bg-amber-100 text-amber-600" : "bg-slate-100 text-slate-600"
+            )}
+          >
+            {user.isPro ? "PRO" : "FREE"}
+          </button>
+          <div className="flex items-center gap-1.5 bg-orange-50 text-orange-600 px-3 py-1.5 rounded-full font-bold text-sm">
+            <Flame size={18} fill="currentColor" />
+            {user.streak}
           </div>
+          <button onClick={handleLogout} className="w-10 h-10 rounded-full overflow-hidden border-2 border-white shadow-sm">
+            <img src={user.photoURL} alt={user.displayName} referrerPolicy="no-referrer" />
+          </button>
         </div>
       </header>
 
-      <main className="max-w-6xl mx-auto px-6 pt-8">
+      <main className="max-w-md mx-auto px-6 pt-8">
         <AnimatePresence mode="wait">
           {view === 'dashboard' && (
-            <Dashboard
-              profile={profile}
-              completedLessons={completedLessons}
-              totalLessons={totalLessons}
-              averageScore={averageScore}
-              dailyChallenge={dailyChallenge}
-              lessons={lessons.slice(0, 5)}
-              setView={setView}
-              setSelectedLesson={setSelectedLesson}
-            />
+            <motion.div
+              key="dashboard"
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -20 }}
+              className="space-y-8"
+            >
+              {/* Daily Goal */}
+              <section className="bg-white p-6 rounded-3xl shadow-sm border border-slate-100">
+                <div className="flex justify-between items-end mb-4">
+                  <div>
+                    <h2 className="text-lg font-bold">Daily Goal</h2>
+                    <p className="text-sm text-slate-500">Keep your streak alive!</p>
+                  </div>
+                  <span className="text-2xl font-black text-primary">{(user.xp || 0) % 50}/50 <span className="text-sm font-medium text-slate-400">XP</span></span>
+                </div>
+                <ProgressBar value={(user.xp || 0) % 50} max={50} />
+              </section>
+
+              {/* Quick Actions */}
+              <div className="grid grid-cols-3 gap-3">
+                <button 
+                  onClick={() => setView('tutor')}
+                  className="flex flex-col items-center gap-2 p-4 bg-primary text-white rounded-2xl shadow-lg shadow-primary/20 hover:scale-105 transition-transform"
+                >
+                  <div className="w-10 h-10 bg-white/20 rounded-xl flex items-center justify-center">
+                    <Mic2 size={20} />
+                  </div>
+                  <span className="font-bold text-xs">AI Tutor</span>
+                </button>
+                <button 
+                  onClick={() => setView('roleplay')}
+                  className="flex flex-col items-center gap-2 p-4 bg-accent text-white rounded-2xl shadow-lg shadow-accent/20 hover:scale-105 transition-transform"
+                >
+                  <div className="w-10 h-10 bg-white/20 rounded-xl flex items-center justify-center">
+                    <RotateCcw size={20} />
+                  </div>
+                  <span className="font-bold text-xs">Role Play</span>
+                </button>
+                <button 
+                  onClick={() => setView('flashcards')}
+                  className="flex flex-col items-center gap-2 p-4 bg-secondary text-white rounded-2xl shadow-lg shadow-secondary/20 hover:scale-105 transition-transform"
+                >
+                  <div className="w-10 h-10 bg-white/20 rounded-xl flex items-center justify-center">
+                    <BookOpen size={20} />
+                  </div>
+                  <span className="font-bold text-xs">Vocab</span>
+                </button>
+              </div>
+
+              {/* Interview Prep Section */}
+              <section className="space-y-4">
+                <div className="flex items-center justify-between px-1">
+                  <h2 className="text-xl font-bold">Interview Prep</h2>
+                  <Badge className="bg-amber-100 text-amber-600">NEW</Badge>
+                </div>
+                <div className="grid grid-cols-1 gap-3">
+                  {ROLE_PLAYS.filter(rp => rp.title.toLowerCase().includes('interview') || rp.title.toLowerCase().includes('negotiation') || rp.title.toLowerCase().includes('presentation')).map((rp) => (
+                    <button
+                      key={rp.id}
+                      onClick={() => {
+                        setSelectedRolePlay(rp);
+                        setView('roleplay');
+                      }}
+                      className="flex items-center gap-4 p-4 bg-white rounded-2xl border border-slate-100 hover:border-primary/30 transition-colors text-left group"
+                    >
+                      <div className="w-12 h-12 bg-amber-50 rounded-xl flex items-center justify-center text-amber-500 group-hover:scale-110 transition-transform">
+                        <UserCheck size={24} />
+                      </div>
+                      <div className="flex-1">
+                        <h3 className="font-bold text-sm">{rp.title}</h3>
+                        <p className="text-xs text-slate-400 line-clamp-1">{rp.scenario}</p>
+                      </div>
+                      <ChevronRight size={18} className="text-slate-300" />
+                    </button>
+                  ))}
+                </div>
+              </section>
+
+              {/* Lessons List */}
+              <section className="space-y-4">
+                <h2 className="text-xl font-bold px-1">Active Lessons</h2>
+                <div className="space-y-3">
+                  {LESSONS.map((lesson) => (
+                    <button
+                      key={lesson.id}
+                      onClick={() => {
+                        setSelectedLesson(lesson);
+                        setView('lesson');
+                      }}
+                      className="w-full flex items-center gap-4 p-4 bg-white rounded-2xl border border-slate-100 hover:border-primary/30 transition-colors text-left group"
+                    >
+                      <div className="w-14 h-14 bg-slate-50 rounded-xl flex items-center justify-center text-slate-400 group-hover:text-primary transition-colors">
+                        <Play size={24} fill="currentColor" />
+                      </div>
+                      <div className="flex-1">
+                        <div className="flex items-center gap-2 mb-1">
+                          <h3 className="font-bold">{lesson.title}</h3>
+                          {user.completedLessons?.includes(lesson.id) && (
+                            <CheckCircle2 size={16} className="text-secondary" />
+                          )}
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <Badge className={cn(
+                            lesson.level === 'Beginner' ? 'bg-green-100 text-green-600' :
+                            lesson.level === 'Intermediate' ? 'bg-blue-100 text-blue-600' :
+                            'bg-purple-100 text-purple-600'
+                          )}>
+                            {lesson.level}
+                          </Badge>
+                          <span className="text-xs text-slate-400 font-medium">• {lesson.xp} XP</span>
+                        </div>
+                      </div>
+                      <ChevronRight size={20} className="text-slate-300" />
+                    </button>
+                  ))}
+                </div>
+              </section>
+            </motion.div>
           )}
 
-          {view === 'lessons' && (
-            <LessonsView
-              lessons={lessons}
-              userProgress={userProgress}
-              setSelectedLesson={setSelectedLesson}
-              setView={setView}
-            />
+          {view === 'lesson' && selectedLesson && (
+            <motion.div
+              key="lesson"
+              initial={{ opacity: 0, x: 20 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: -20 }}
+              className="space-y-6"
+            >
+              <button 
+                onClick={() => setView('dashboard')}
+                className="flex items-center gap-2 text-slate-500 font-medium"
+              >
+                <X size={20} /> Back to Dashboard
+              </button>
+
+              <div className="bg-white p-8 rounded-3xl shadow-sm border border-slate-100 text-center space-y-6">
+                <div className="w-20 h-20 bg-primary/10 text-primary rounded-2xl flex items-center justify-center mx-auto">
+                  <BookOpen size={40} />
+                </div>
+                <div>
+                  <h2 className="text-2xl font-bold mb-2">{selectedLesson.title}</h2>
+                  <p className="text-slate-500 leading-relaxed">{selectedLesson.description}</p>
+                </div>
+                
+                <div className="grid grid-cols-2 gap-4 pt-4">
+                  <div className="p-4 bg-slate-50 rounded-2xl">
+                    <span className="block text-xs font-bold text-slate-400 uppercase mb-1">Topic</span>
+                    <span className="font-bold">{selectedLesson.topic}</span>
+                  </div>
+                  <div className="p-4 bg-slate-50 rounded-2xl">
+                    <span className="block text-xs font-bold text-slate-400 uppercase mb-1">Level</span>
+                    <span className="font-bold">{selectedLesson.level}</span>
+                  </div>
+                </div>
+
+                <button 
+                  onClick={() => completeLesson(selectedLesson.id, selectedLesson.xp)}
+                  className="w-full py-4 bg-primary text-white rounded-2xl font-bold shadow-lg shadow-primary/30 hover:scale-[1.02] active:scale-95 transition-all"
+                >
+                  Start Lesson
+                </button>
+              </div>
+            </motion.div>
           )}
 
-          {view === 'practice' && selectedLesson && (
-            <PracticeView
-              lesson={selectedLesson}
-              isProcessing={isProcessing}
-              analysisResult={analysisResult}
-              handleRecordingComplete={handleRecordingComplete}
-              setView={setView}
-              setAnalysisResult={setAnalysisResult}
-            />
-          )}
+          {view === 'subscription' && (
+            <motion.div
+              key="subscription"
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -20 }}
+              className="space-y-8"
+            >
+              <div className="text-center space-y-4">
+                <div className="w-20 h-20 bg-amber-100 text-amber-600 rounded-3xl flex items-center justify-center mx-auto">
+                  <Star size={40} fill="currentColor" />
+                </div>
+                <h2 className="text-3xl font-black">LingoFlow Pro</h2>
+                <p className="text-slate-500">Unlock unlimited AI tutor sessions and advanced role-play scenarios.</p>
+              </div>
 
-          {view === 'challenge' && dailyChallenge && (
-            <ChallengeView
-              challenge={dailyChallenge}
-              isProcessing={isProcessing}
-              analysisResult={analysisResult}
-              handleRecordingComplete={handleRecordingComplete}
-              setView={setView}
-              setAnalysisResult={setAnalysisResult}
-            />
+              <div className="bg-white p-8 rounded-3xl border-2 border-primary shadow-xl space-y-6 relative overflow-hidden">
+                <div className="absolute top-0 right-0 bg-primary text-white px-4 py-1 rounded-bl-2xl text-xs font-bold">BEST VALUE</div>
+                <div className="flex justify-between items-end">
+                  <div>
+                    <h3 className="text-xl font-bold">Monthly Plan</h3>
+                    <p className="text-slate-400 text-sm">Billed monthly</p>
+                  </div>
+                  <div className="text-right">
+                    <span className="text-3xl font-black">$9.99</span>
+                    <span className="text-slate-400 text-sm">/mo</span>
+                  </div>
+                </div>
+                <ul className="space-y-3">
+                  {['Unlimited AI Conversations', 'Advanced Business Lessons', 'Priority Support', 'Ad-free Experience'].map(feature => (
+                    <li key={feature} className="flex items-center gap-3 text-sm font-medium">
+                      <CheckCircle2 size={18} className="text-secondary" />
+                      {feature}
+                    </li>
+                  ))}
+                </ul>
+                <button 
+                  onClick={handleUpgrade}
+                  disabled={user.isPro}
+                  className="w-full py-4 bg-primary text-white rounded-2xl font-bold shadow-lg shadow-primary/30 hover:scale-[1.02] active:scale-95 transition-all disabled:opacity-50"
+                >
+                  {user.isPro ? "Already Pro" : "Upgrade Now"}
+                </button>
+              </div>
+            </motion.div>
           )}
+          {view === 'roleplay' && (
+            <motion.div
+              key="roleplay"
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -20 }}
+              className="space-y-6"
+            >
+              <div className="flex justify-between items-center">
+                <button 
+                  onClick={() => setView('dashboard')}
+                  className="p-2 hover:bg-slate-200 rounded-full transition-colors"
+                >
+                  <X size={24} />
+                </button>
+                <h2 className="text-xl font-bold">Role Play Scenarios</h2>
+                <div className="w-10" />
+              </div>
 
-          {view === 'leaderboard' && (
-            <LeaderboardView
-              leaderboard={leaderboard}
-              currentUserId={profile?.id}
-              setView={setView}
-            />
+              <div className="grid gap-4">
+                {ROLE_PLAYS.map((rp) => (
+                  <button
+                    key={rp.id}
+                    onClick={() => {
+                      setSelectedRolePlay(rp);
+                      setView('tutor');
+                    }}
+                    className="w-full p-6 bg-white rounded-3xl border border-slate-100 text-left hover:border-primary/30 transition-all group"
+                  >
+                    <h3 className="text-lg font-bold mb-1 group-hover:text-primary transition-colors">{rp.title}</h3>
+                    <p className="text-sm text-slate-500 mb-4">{rp.scenario}</p>
+                    <div className="flex gap-2">
+                      <Badge className="bg-slate-100 text-slate-600">Tutor: {rp.tutorRole}</Badge>
+                      <Badge className="bg-primary/10 text-primary">You: {rp.userRole}</Badge>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </motion.div>
           )}
 
           {view === 'tutor' && (
-            <TutorView
-              chatMessages={chatMessages}
-              chatInput={chatInput}
-              setChatInput={setChatInput}
-              sendChatMessage={sendChatMessage}
-              currentSessionId={currentSessionId}
-              startChatSession={startChatSession}
-              setView={setView}
-            />
+            <motion.div
+              key="tutor"
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="space-y-8 text-center"
+            >
+              <div className="flex justify-between items-center">
+                <button 
+                  onClick={() => {
+                    tutorService.disconnect();
+                    setIsTutorActive(false);
+                    setView('dashboard');
+                  }}
+                  className="p-2 hover:bg-slate-200 rounded-full transition-colors"
+                >
+                  <X size={24} />
+                </button>
+                <h2 className="text-xl font-bold">AI Tutor Session</h2>
+                <div className="w-10" />
+              </div>
+
+              <div className="relative py-12">
+                <div className={cn(
+                  "w-48 h-48 rounded-full bg-primary/10 mx-auto flex items-center justify-center transition-all duration-500",
+                  isTutorActive && "scale-110 shadow-[0_0_50px_rgba(59,130,246,0.3)]"
+                )}>
+                  <div className={cn(
+                    "w-32 h-32 rounded-full bg-primary flex items-center justify-center text-white shadow-xl",
+                    isTutorActive && "animate-pulse"
+                  )}>
+                    <Mic2 size={48} />
+                  </div>
+                </div>
+                
+                {isTutorActive && (
+                  <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                    {[1, 2, 3].map((i) => (
+                      <motion.div
+                        key={i}
+                        initial={{ scale: 1, opacity: 0.5 }}
+                        animate={{ scale: 2, opacity: 0 }}
+                        transition={{ duration: 2, repeat: Infinity, delay: i * 0.6 }}
+                        className="absolute w-48 h-48 border-2 border-primary rounded-full"
+                      />
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {isTutorActive && tutorTranscript && (
+                <motion.div 
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 max-w-xs mx-auto"
+                >
+                  <p className="text-sm text-slate-600 italic">"{tutorTranscript}"</p>
+                </motion.div>
+              )}
+
+              <div className="space-y-4">
+                <h3 className="text-2xl font-bold">
+                  {isTutorActive ? "Listening..." : "Ready to practice?"}
+                </h3>
+                <p className="text-slate-500 max-w-xs mx-auto">
+                  {isTutorActive 
+                    ? "Speak naturally. Alex is listening and will respond in real-time." 
+                    : "Tap the button below to start a voice conversation with Alex."}
+                </p>
+              </div>
+
+              {!isTutorActive ? (
+                <button 
+                  onClick={async () => {
+                    setIsTutorActive(true);
+                    setTutorTranscript("");
+                    await tutorService.connect({
+                      onAudioData: () => {},
+                      onTextData: (text) => setTutorTranscript(text),
+                      onError: (err) => {
+                        console.error(err);
+                        setIsTutorActive(false);
+                      },
+                      onClose: () => setIsTutorActive(false),
+                      rolePlay: selectedRolePlay || undefined
+                    });
+                  }}
+                  className="px-12 py-4 bg-primary text-white rounded-full font-bold shadow-xl shadow-primary/30 hover:scale-105 active:scale-95 transition-all"
+                >
+                  Start Conversation
+                </button>
+              ) : (
+                <button 
+                  onClick={() => {
+                    tutorService.disconnect();
+                    setIsTutorActive(false);
+                  }}
+                  className="px-12 py-4 bg-red-500 text-white rounded-full font-bold shadow-xl shadow-red-500/30 hover:scale-105 active:scale-95 transition-all"
+                >
+                  End Session
+                </button>
+              )}
+            </motion.div>
           )}
 
-          {view === 'analytics' && (
-            <AnalyticsView
-              profile={profile}
-              userProgress={userProgress}
-              completedLessons={completedLessons}
-              totalLessons={totalLessons}
-              averageScore={averageScore}
-              setView={setView}
-            />
+          {view === 'flashcards' && (
+            <motion.div
+              key="flashcards"
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -20 }}
+              className="space-y-8"
+            >
+              <div className="flex justify-between items-center">
+                <button 
+                  onClick={() => setView('dashboard')}
+                  className="p-2 hover:bg-slate-200 rounded-full transition-colors"
+                >
+                  <X size={24} />
+                </button>
+                <h2 className="text-xl font-bold">Vocabulary Builder</h2>
+                <div className="w-10" />
+              </div>
+
+              <div className="space-y-6">
+                {VOCABULARY.map((card, idx) => (
+                  <motion.div
+                    key={card.word}
+                    initial={{ opacity: 0, x: -20 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    transition={{ delay: idx * 0.1 }}
+                    className="bg-white p-6 rounded-3xl shadow-sm border border-slate-100 space-y-4"
+                  >
+                    <div className="flex justify-between items-start">
+                      <div>
+                        <h3 className="text-2xl font-bold text-primary">{card.word}</h3>
+                        <p className="text-slate-400 font-mono text-sm">{card.phonetic}</p>
+                      </div>
+                      <button 
+                        onClick={() => {
+                          const utterance = new SpeechSynthesisUtterance(card.word);
+                          utterance.lang = 'en-US';
+                          window.speechSynthesis.speak(utterance);
+                        }}
+                        className="p-3 bg-blue-50 text-blue-600 rounded-2xl hover:bg-blue-100 transition-colors"
+                      >
+                        <Volume2 size={20} />
+                      </button>
+                    </div>
+                    <p className="text-slate-600 leading-relaxed">
+                      <span className="font-bold text-slate-900">Definition:</span> {card.definition}
+                    </p>
+                    <div className="p-4 bg-slate-50 rounded-2xl italic text-slate-500 text-sm">
+                      "{card.example}"
+                    </div>
+                  </motion.div>
+                ))}
+              </div>
+
+              <button 
+                onClick={() => {
+                  addXP(20);
+                  setView('dashboard');
+                }}
+                className="w-full py-4 bg-secondary text-white rounded-2xl font-bold shadow-lg shadow-secondary/30"
+              >
+                Mark as Mastered (+20 XP)
+              </button>
+            </motion.div>
           )}
         </AnimatePresence>
       </main>
 
-      <nav className="fixed bottom-0 left-0 right-0 glass border-t border-slate-200 px-6 py-3">
-        <div className="max-w-6xl mx-auto flex justify-around items-center">
-          <NavButton icon={Home} label="Home" active={view === 'dashboard'} onClick={() => setView('dashboard')} />
-          <NavButton icon={BookOpen} label="Lessons" active={view === 'lessons'} onClick={() => setView('lessons')} />
-          <NavButton icon={Calendar} label="Challenge" active={view === 'challenge'} onClick={() => setView('challenge')} />
-          <NavButton icon={Users} label="Leaderboard" active={view === 'leaderboard'} onClick={() => setView('leaderboard')} />
-          <NavButton icon={MessageSquare} label="AI Tutor" active={view === 'tutor'} onClick={() => setView('tutor')} />
-          <NavButton icon={BarChart3} label="Analytics" active={view === 'analytics'} onClick={() => setView('analytics')} />
-        </div>
+      {/* Navigation Bar */}
+      <nav className="fixed bottom-0 left-0 right-0 glass border-t border-slate-200 px-8 py-4 flex justify-around items-center">
+        {/* ... */}
       </nav>
 
-      {error && (
-        <motion.div
-          initial={{ opacity: 0, y: 50 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: 50 }}
-          className="fixed bottom-24 left-6 right-6 bg-red-600 text-white p-4 rounded-2xl shadow-xl flex items-center gap-3 z-50"
-        >
-          <AlertCircle size={20} />
-          <p className="text-sm font-medium flex-1">{error}</p>
-          <button onClick={() => setError(null)}>
-            <X size={18} />
-          </button>
-        </motion.div>
-      )}
+      {/* Global Error Toast */}
+      <AnimatePresence>
+        {globalError && (
+          <motion.div
+            initial={{ opacity: 0, y: 50 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 50 }}
+            className="fixed bottom-24 left-6 right-6 bg-red-600 text-white p-4 rounded-2xl shadow-xl flex items-center gap-3 z-50"
+          >
+            <AlertCircle size={20} />
+            <p className="text-sm font-medium flex-1">{globalError}</p>
+            <button onClick={() => setGlobalError(null)}>
+              <X size={18} />
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
 
-// Navigation Button Component
-function NavButton({ icon: Icon, label, active, onClick }: any) {
+export default function AppWithErrorBoundary() {
   return (
-    <button
-      onClick={onClick}
-      className={cn(
-        "flex flex-col items-center gap-1 px-3 py-2 rounded-xl transition-colors",
-        active ? "text-primary bg-blue-50" : "text-slate-400 hover:text-slate-600"
-      )}
-    >
-      <Icon size={20} />
-      <span className="text-[10px] font-bold">{label}</span>
-    </button>
+    <ErrorBoundary>
+      <App />
+    </ErrorBoundary>
   );
 }
-
-// View Components will be in the next file
-export default App;
