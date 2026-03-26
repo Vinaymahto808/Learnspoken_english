@@ -20,7 +20,7 @@ import {
 import { cn } from './lib/utils';
 import { LESSONS, VOCABULARY, ROLE_PLAYS, type Lesson, type UserProgress, type Level, type RolePlay } from './types';
 import { GeminiLiveService } from './services/geminiLiveService';
-import { auth, db, googleProvider, signInWithRedirect, getRedirectResult, signOut, doc, getDoc, setDoc, updateDoc, onSnapshot } from './firebase';
+import { auth, db, googleProvider, signInWithPopup, signInWithRedirect, getRedirectResult, signOut, doc, getDoc, setDoc, updateDoc, onSnapshot } from './firebase';
 import { loadStripe } from '@stripe/stripe-js';
 
 const stripePromise = process.env.VITE_STRIPE_PUBLISHABLE_KEY 
@@ -79,6 +79,64 @@ const Badge = ({ children, className }: { children: React.ReactNode; className?:
   </span>
 );
 
+// --- Standalone Auth Page (opened in new tab for iframe-safe login) ---
+
+export function StandaloneAuthPage() {
+  const [status, setStatus] = useState<'idle' | 'loading' | 'done' | 'error'>('idle');
+  const [errorMsg, setErrorMsg] = useState('');
+
+  const handleSignIn = async () => {
+    setStatus('loading');
+    try {
+      await signInWithPopup(auth, googleProvider);
+      setStatus('done');
+      setTimeout(() => window.close(), 1500);
+    } catch (error: any) {
+      console.error('Auth error', error);
+      setErrorMsg(error?.message || 'Sign-in failed.');
+      setStatus('error');
+    }
+  };
+
+  return (
+    <div className="min-h-screen flex flex-col items-center justify-center bg-slate-50 p-6 text-center">
+      <div className="w-20 h-20 bg-primary rounded-3xl flex items-center justify-center text-white shadow-2xl mb-8">
+        <Layout size={40} />
+      </div>
+      <h1 className="text-3xl font-black tracking-tight mb-2">SpeakEase</h1>
+      <p className="text-slate-500 mb-10">Sign in to continue</p>
+
+      {status === 'done' ? (
+        <div className="text-secondary font-bold text-lg flex items-center gap-2">
+          <CheckCircle2 size={24} /> Signed in! Closing tab…
+        </div>
+      ) : (
+        <>
+          <button
+            onClick={handleSignIn}
+            disabled={status === 'loading'}
+            className="w-full max-w-xs py-4 bg-white border border-slate-200 rounded-2xl font-bold flex items-center justify-center gap-3 hover:bg-slate-50 active:scale-95 transition-all shadow-sm disabled:opacity-60"
+          >
+            {status === 'loading' ? (
+              <motion.div
+                animate={{ rotate: 360 }}
+                transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}
+                className="w-5 h-5 border-2 border-slate-400 border-t-transparent rounded-full"
+              />
+            ) : (
+              <img src="https://www.google.com/favicon.ico" className="w-5 h-5" alt="Google" />
+            )}
+            {status === 'loading' ? 'Signing in…' : 'Continue with Google'}
+          </button>
+          {status === 'error' && (
+            <p className="mt-4 text-sm text-red-500 max-w-xs">{errorMsg}</p>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 // --- Main App ---
 
 function App() {
@@ -127,20 +185,22 @@ function App() {
     return () => unsubscribe();
   }, []);
 
-  const handleLogin = async () => {
+  const handleLogin = () => {
     setLoginError(null);
     setLoginLoading(true);
-    try {
-      await signInWithRedirect(auth, googleProvider);
-    } catch (error: any) {
-      console.error("Login failed", error);
-      if (error?.code === 'auth/unauthorized-domain') {
-        setLoginError('This domain is not authorized in Firebase. Please add it to Firebase Console → Authentication → Settings → Authorized domains.');
-      } else {
-        setLoginError(error?.message || 'Sign-in failed. Please try again.');
-      }
+    const authUrl = `${window.location.origin}/?auth=1`;
+    const popup = window.open(authUrl, 'speakease-auth', 'width=480,height=640,left=200,top=100');
+    if (!popup) {
+      setLoginError('Pop-up was blocked. Please allow pop-ups for this site and try again.');
       setLoginLoading(false);
+      return;
     }
+    const timer = setInterval(() => {
+      if (popup.closed) {
+        clearInterval(timer);
+        setLoginLoading(false);
+      }
+    }, 500);
   };
 
   const handleLogout = () => signOut(auth);
@@ -217,8 +277,11 @@ function App() {
           ) : (
             <img src="https://www.google.com/favicon.ico" className="w-5 h-5" alt="Google" />
           )}
-          {loginLoading ? 'Redirecting...' : 'Continue with Google'}
+          {loginLoading ? 'Waiting for sign-in…' : 'Continue with Google'}
         </button>
+        {loginLoading && (
+          <p className="mt-3 text-xs text-slate-400">A sign-in window has opened. Complete sign-in there to continue.</p>
+        )}
         {loginError && (
           <div className="mt-4 max-w-xs p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-600 text-left">
             <strong>Sign-in error:</strong> {loginError}
