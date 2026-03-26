@@ -85,6 +85,8 @@ function App() {
   const [user, setUser] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [globalError, setGlobalError] = useState<string | null>(null);
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [loginLoading, setLoginLoading] = useState(false);
   const [view, setView] = useState<'dashboard' | 'lesson' | 'tutor' | 'flashcards' | 'roleplay' | 'subscription'>('dashboard');
   const [selectedLesson, setSelectedLesson] = useState<Lesson | null>(null);
   const [selectedRolePlay, setSelectedRolePlay] = useState<RolePlay | null>(null);
@@ -126,10 +128,18 @@ function App() {
   }, []);
 
   const handleLogin = async () => {
+    setLoginError(null);
+    setLoginLoading(true);
     try {
       await signInWithRedirect(auth, googleProvider);
-    } catch (error) {
+    } catch (error: any) {
       console.error("Login failed", error);
+      if (error?.code === 'auth/unauthorized-domain') {
+        setLoginError('This domain is not authorized in Firebase. Please add it to Firebase Console → Authentication → Settings → Authorized domains.');
+      } else {
+        setLoginError(error?.message || 'Sign-in failed. Please try again.');
+      }
+      setLoginLoading(false);
     }
   };
 
@@ -195,11 +205,25 @@ function App() {
         <p className="text-slate-500 max-w-xs mb-12">Master spoken English with your personal AI tutor. Sign in to track your progress.</p>
         <button 
           onClick={handleLogin}
-          className="w-full max-w-xs py-4 bg-white border border-slate-200 rounded-2xl font-bold flex items-center justify-center gap-3 hover:bg-slate-50 transition-colors shadow-sm"
+          disabled={loginLoading}
+          className="w-full max-w-xs py-4 bg-white border border-slate-200 rounded-2xl font-bold flex items-center justify-center gap-3 hover:bg-slate-50 active:scale-95 transition-all shadow-sm disabled:opacity-60 disabled:cursor-not-allowed"
         >
-          <img src="https://www.google.com/favicon.ico" className="w-5 h-5" alt="Google" />
-          Continue with Google
+          {loginLoading ? (
+            <motion.div
+              animate={{ rotate: 360 }}
+              transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
+              className="w-5 h-5 border-2 border-slate-400 border-t-transparent rounded-full"
+            />
+          ) : (
+            <img src="https://www.google.com/favicon.ico" className="w-5 h-5" alt="Google" />
+          )}
+          {loginLoading ? 'Redirecting...' : 'Continue with Google'}
         </button>
+        {loginError && (
+          <div className="mt-4 max-w-xs p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-600 text-left">
+            <strong>Sign-in error:</strong> {loginError}
+          </div>
+        )}
       </div>
     );
   }
