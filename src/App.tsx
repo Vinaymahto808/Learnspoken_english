@@ -20,7 +20,7 @@ import {
 import { cn } from './lib/utils';
 import { LESSONS, VOCABULARY, ROLE_PLAYS, type Lesson, type UserProgress, type Level, type RolePlay } from './types';
 import { GeminiLiveService } from './services/geminiLiveService';
-import { auth, db, googleProvider, signInWithPopup, signOut, doc, getDoc, setDoc, updateDoc, onSnapshot } from './firebase';
+import { auth, db, googleProvider, signInWithRedirect, getRedirectResult, signOut, doc, getDoc, setDoc, updateDoc, onSnapshot } from './firebase';
 import { loadStripe } from '@stripe/stripe-js';
 
 const stripePromise = process.env.VITE_STRIPE_PUBLISHABLE_KEY 
@@ -93,6 +93,10 @@ function App() {
   const [tutorService] = useState(() => new GeminiLiveService());
   
   useEffect(() => {
+    getRedirectResult(auth).catch((error) => {
+      console.error("Redirect sign-in error", error);
+    });
+
     const unsubscribe = auth.onAuthStateChanged(async (firebaseUser) => {
       if (firebaseUser) {
         const userDoc = await getDoc(doc(db, 'users', firebaseUser.uid));
@@ -123,7 +127,7 @@ function App() {
 
   const handleLogin = async () => {
     try {
-      await signInWithPopup(auth, googleProvider);
+      await signInWithRedirect(auth, googleProvider);
     } catch (error) {
       console.error("Login failed", error);
     }
