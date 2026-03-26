@@ -1,13 +1,10 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
-  Trophy, 
   Flame, 
   BookOpen, 
   Mic2, 
-  Settings, 
   ChevronRight, 
-  Star,
   CheckCircle2,
   Play,
   Volume2,
@@ -18,14 +15,8 @@ import {
   AlertCircle
 } from 'lucide-react';
 import { cn } from './lib/utils';
-import { LESSONS, VOCABULARY, ROLE_PLAYS, type Lesson, type UserProgress, type Level, type RolePlay } from './types';
+import { LESSONS, VOCABULARY, ROLE_PLAYS, type Lesson, type RolePlay } from './types';
 import { GeminiLiveService } from './services/geminiLiveService';
-import { auth, db, googleProvider, signInWithPopup, signInWithRedirect, getRedirectResult, signOut, doc, getDoc, setDoc, updateDoc, onSnapshot } from './firebase';
-import { loadStripe } from '@stripe/stripe-js';
-
-const stripePromise = process.env.VITE_STRIPE_PUBLISHABLE_KEY 
-  ? loadStripe(process.env.VITE_STRIPE_PUBLISHABLE_KEY) 
-  : null;
 
 // --- Components ---
 
@@ -79,250 +70,29 @@ const Badge = ({ children, className }: { children: React.ReactNode; className?:
   </span>
 );
 
-// --- Standalone Auth Page (opened in new tab for iframe-safe login) ---
-
-export function StandaloneAuthPage() {
-  const [status, setStatus] = useState<'idle' | 'loading' | 'done' | 'error'>('idle');
-  const [errorMsg, setErrorMsg] = useState('');
-
-  const handleSignIn = async () => {
-    setStatus('loading');
-    try {
-      await signInWithPopup(auth, googleProvider);
-      setStatus('done');
-      setTimeout(() => window.close(), 1500);
-    } catch (error: any) {
-      console.error('Auth error', error);
-      setErrorMsg(error?.message || 'Sign-in failed.');
-      setStatus('error');
-    }
-  };
-
-  return (
-    <div className="min-h-screen flex flex-col items-center justify-center bg-slate-50 p-6 text-center">
-      <div className="w-20 h-20 bg-primary rounded-3xl flex items-center justify-center text-white shadow-2xl mb-8">
-        <Layout size={40} />
-      </div>
-      <h1 className="text-3xl font-black tracking-tight mb-2">SpeakEase</h1>
-      <p className="text-slate-500 mb-10">Sign in to continue</p>
-
-      {status === 'done' ? (
-        <div className="text-secondary font-bold text-lg flex items-center gap-2">
-          <CheckCircle2 size={24} /> Signed in! Closing tab…
-        </div>
-      ) : (
-        <>
-          <button
-            onClick={handleSignIn}
-            disabled={status === 'loading'}
-            className="w-full max-w-xs py-4 bg-white border border-slate-200 rounded-2xl font-bold flex items-center justify-center gap-3 hover:bg-slate-50 active:scale-95 transition-all shadow-sm disabled:opacity-60"
-          >
-            {status === 'loading' ? (
-              <motion.div
-                animate={{ rotate: 360 }}
-                transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}
-                className="w-5 h-5 border-2 border-slate-400 border-t-transparent rounded-full"
-              />
-            ) : (
-              <img src="https://www.google.com/favicon.ico" className="w-5 h-5" alt="Google" />
-            )}
-            {status === 'loading' ? 'Signing in…' : 'Continue with Google'}
-          </button>
-          {status === 'error' && (
-            <p className="mt-4 text-sm text-red-500 max-w-xs">{errorMsg}</p>
-          )}
-        </>
-      )}
-    </div>
-  );
-}
-
 // --- Main App ---
 
 function App() {
-  const [user, setUser] = useState<any>(null);
-  const [loading, setLoading] = useState(true);
-  const [globalError, setGlobalError] = useState<string | null>(null);
-  const [loginError, setLoginError] = useState<string | null>(null);
-  const [loginLoading, setLoginLoading] = useState(false);
-  const [view, setView] = useState<'dashboard' | 'lesson' | 'tutor' | 'flashcards' | 'roleplay' | 'subscription'>('dashboard');
+  const [xp, setXp] = useState(0);
+  const [streak] = useState(1);
+  const [completedLessons, setCompletedLessons] = useState<string[]>([]);
+  const [view, setView] = useState<'dashboard' | 'lesson' | 'tutor' | 'flashcards' | 'roleplay'>('dashboard');
   const [selectedLesson, setSelectedLesson] = useState<Lesson | null>(null);
   const [selectedRolePlay, setSelectedRolePlay] = useState<RolePlay | null>(null);
   const [isTutorActive, setIsTutorActive] = useState(false);
   const [tutorTranscript, setTutorTranscript] = useState("");
   const [tutorService] = useState(() => new GeminiLiveService());
-  
-  useEffect(() => {
-    getRedirectResult(auth).catch((error) => {
-      console.error("Redirect sign-in error", error);
-    });
 
-    const unsubscribe = auth.onAuthStateChanged(async (firebaseUser) => {
-      if (firebaseUser) {
-        const userDoc = await getDoc(doc(db, 'users', firebaseUser.uid));
-        if (!userDoc.exists()) {
-          const newUser = {
-            uid: firebaseUser.uid,
-            email: firebaseUser.email,
-            displayName: firebaseUser.displayName,
-            photoURL: firebaseUser.photoURL,
-            xp: 0,
-            streak: 0,
-            lastActive: new Date().toISOString(),
-            completedLessons: [],
-            isPro: false
-          };
-          await setDoc(doc(db, 'users', firebaseUser.uid), newUser);
-          setUser(newUser);
-        } else {
-          setUser(userDoc.data());
-        }
-      } else {
-        setUser(null);
-      }
-      setLoading(false);
-    });
-    return () => unsubscribe();
-  }, []);
-
-  const handleLogin = () => {
-    setLoginError(null);
-    setLoginLoading(true);
-    const authUrl = `${window.location.origin}/?auth=1`;
-    const popup = window.open(authUrl, 'speakease-auth', 'width=480,height=640,left=200,top=100');
-    if (!popup) {
-      setLoginError('Pop-up was blocked. Please allow pop-ups for this site and try again.');
-      setLoginLoading(false);
-      return;
-    }
-    const timer = setInterval(() => {
-      if (popup.closed) {
-        clearInterval(timer);
-        setLoginLoading(false);
-      }
-    }, 500);
+  const addXP = (amount: number) => {
+    setXp(prev => prev + amount);
   };
 
-  const handleLogout = () => signOut(auth);
-
-  const handleFirestoreError = (error: any, operation: string, path: string) => {
-    const errInfo = {
-      error: error.message,
-      operationType: operation,
-      path,
-      authInfo: {
-        userId: auth.currentUser?.uid,
-        email: auth.currentUser?.email,
-      }
-    };
-    console.error('Firestore Error:', JSON.stringify(errInfo));
-    setGlobalError(error.message);
-    setTimeout(() => setGlobalError(null), 5000);
-  };
-
-  const handleUpgrade = async () => {
-    if (!user) return handleLogin();
-    
-    try {
-      const response = await fetch('/api/create-checkout-session', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          priceId: 'price_H5ggY9q12345', // Placeholder
-          userId: user.uid,
-          email: user.email
-        })
-      });
-      const session = await response.json();
-      const stripe = await stripePromise;
-      if (stripe) {
-        await (stripe as any).redirectToCheckout({ sessionId: session.id });
-      }
-    } catch (error) {
-      console.error("Checkout failed", error);
+  const completeLesson = (id: string, lessonXp: number) => {
+    if (!completedLessons.includes(id)) {
+      setXp(prev => prev + lessonXp);
+      setCompletedLessons(prev => [...prev, id]);
     }
-  };
-
-  if (loading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-50">
-        <motion.div 
-          animate={{ rotate: 360 }}
-          transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
-          className="w-12 h-12 border-4 border-primary border-t-transparent rounded-full"
-        />
-      </div>
-    );
-  }
-
-  if (!user) {
-    return (
-      <div className="min-h-screen flex flex-col items-center justify-center bg-slate-50 p-6 text-center">
-        <div className="w-20 h-20 bg-primary rounded-3xl flex items-center justify-center text-white shadow-2xl mb-8">
-          <Layout size={40} />
-        </div>
-        <h1 className="text-4xl font-black tracking-tight mb-4">SpeakEase</h1>
-        <p className="text-slate-500 max-w-xs mb-12">Master spoken English with your personal AI tutor. Sign in to track your progress.</p>
-        <button 
-          onClick={handleLogin}
-          disabled={loginLoading}
-          className="w-full max-w-xs py-4 bg-white border border-slate-200 rounded-2xl font-bold flex items-center justify-center gap-3 hover:bg-slate-50 active:scale-95 transition-all shadow-sm disabled:opacity-60 disabled:cursor-not-allowed"
-        >
-          {loginLoading ? (
-            <motion.div
-              animate={{ rotate: 360 }}
-              transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
-              className="w-5 h-5 border-2 border-slate-400 border-t-transparent rounded-full"
-            />
-          ) : (
-            <img src="https://www.google.com/favicon.ico" className="w-5 h-5" alt="Google" />
-          )}
-          {loginLoading ? 'Waiting for sign-in…' : 'Continue with Google'}
-        </button>
-        {loginLoading && (
-          <p className="mt-3 text-xs text-slate-400">A sign-in window has opened. Complete sign-in there to continue.</p>
-        )}
-        {loginError && (
-          <div className="mt-4 max-w-xs p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-600 text-left">
-            <strong>Sign-in error:</strong> {loginError}
-          </div>
-        )}
-      </div>
-    );
-  }
-
-  const addXP = async (amount: number) => {
-    if (!user) return;
-    try {
-      const newXP = (user.xp || 0) + amount;
-      await updateDoc(doc(db, 'users', user.uid), { xp: newXP });
-      setUser((prev: any) => ({ ...prev, xp: newXP }));
-    } catch (error) {
-      handleFirestoreError(error, 'update', `users/${user.uid}`);
-    }
-  };
-
-  const completeLesson = async (id: string, xp: number) => {
-    if (!user) return;
-    try {
-      const completedLessons = user.completedLessons || [];
-      if (!completedLessons.includes(id)) {
-        const newXP = (user.xp || 0) + xp;
-        const newCompleted = [...completedLessons, id];
-        await updateDoc(doc(db, 'users', user.uid), { 
-          xp: newXP,
-          completedLessons: newCompleted
-        });
-        setUser((prev: any) => ({ 
-          ...prev, 
-          xp: newXP,
-          completedLessons: newCompleted
-        }));
-      }
-      setView('dashboard');
-    } catch (error) {
-      handleFirestoreError(error, 'update', `users/${user.uid}`);
-    }
+    setView('dashboard');
   };
 
   return (
@@ -336,22 +106,13 @@ function App() {
           <h1 className="text-xl font-bold tracking-tight">SpeakEase</h1>
         </div>
         <div className="flex items-center gap-4">
-          <button 
-            onClick={() => setView('subscription')}
-            className={cn(
-              "px-3 py-1.5 rounded-full font-bold text-xs",
-              user.isPro ? "bg-amber-100 text-amber-600" : "bg-slate-100 text-slate-600"
-            )}
-          >
-            {user.isPro ? "PRO" : "FREE"}
-          </button>
+          <div className="flex items-center gap-1.5 bg-primary/10 text-primary px-3 py-1.5 rounded-full font-bold text-sm">
+            {xp} XP
+          </div>
           <div className="flex items-center gap-1.5 bg-orange-50 text-orange-600 px-3 py-1.5 rounded-full font-bold text-sm">
             <Flame size={18} fill="currentColor" />
-            {user.streak}
+            {streak}
           </div>
-          <button onClick={handleLogout} className="w-10 h-10 rounded-full overflow-hidden border-2 border-white shadow-sm">
-            <img src={user.photoURL} alt={user.displayName} referrerPolicy="no-referrer" />
-          </button>
         </div>
       </header>
 
@@ -372,9 +133,9 @@ function App() {
                     <h2 className="text-lg font-bold">Daily Goal</h2>
                     <p className="text-sm text-slate-500">Keep your streak alive!</p>
                   </div>
-                  <span className="text-2xl font-black text-primary">{(user.xp || 0) % 50}/50 <span className="text-sm font-medium text-slate-400">XP</span></span>
+                  <span className="text-2xl font-black text-primary">{xp % 50}/50 <span className="text-sm font-medium text-slate-400">XP</span></span>
                 </div>
-                <ProgressBar value={(user.xp || 0) % 50} max={50} />
+                <ProgressBar value={xp % 50} max={50} />
               </section>
 
               {/* Quick Actions */}
@@ -456,7 +217,7 @@ function App() {
                       <div className="flex-1">
                         <div className="flex items-center gap-2 mb-1">
                           <h3 className="font-bold">{lesson.title}</h3>
-                          {user.completedLessons?.includes(lesson.id) && (
+                          {completedLessons.includes(lesson.id) && (
                             <CheckCircle2 size={16} className="text-secondary" />
                           )}
                         </div>
@@ -518,58 +279,12 @@ function App() {
                   onClick={() => completeLesson(selectedLesson.id, selectedLesson.xp)}
                   className="w-full py-4 bg-primary text-white rounded-2xl font-bold shadow-lg shadow-primary/30 hover:scale-[1.02] active:scale-95 transition-all"
                 >
-                  Start Lesson
+                  Complete Lesson (+{selectedLesson.xp} XP)
                 </button>
               </div>
             </motion.div>
           )}
 
-          {view === 'subscription' && (
-            <motion.div
-              key="subscription"
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -20 }}
-              className="space-y-8"
-            >
-              <div className="text-center space-y-4">
-                <div className="w-20 h-20 bg-amber-100 text-amber-600 rounded-3xl flex items-center justify-center mx-auto">
-                  <Star size={40} fill="currentColor" />
-                </div>
-                <h2 className="text-3xl font-black">LingoFlow Pro</h2>
-                <p className="text-slate-500">Unlock unlimited AI tutor sessions and advanced role-play scenarios.</p>
-              </div>
-
-              <div className="bg-white p-8 rounded-3xl border-2 border-primary shadow-xl space-y-6 relative overflow-hidden">
-                <div className="absolute top-0 right-0 bg-primary text-white px-4 py-1 rounded-bl-2xl text-xs font-bold">BEST VALUE</div>
-                <div className="flex justify-between items-end">
-                  <div>
-                    <h3 className="text-xl font-bold">Monthly Plan</h3>
-                    <p className="text-slate-400 text-sm">Billed monthly</p>
-                  </div>
-                  <div className="text-right">
-                    <span className="text-3xl font-black">$9.99</span>
-                    <span className="text-slate-400 text-sm">/mo</span>
-                  </div>
-                </div>
-                <ul className="space-y-3">
-                  {['Unlimited AI Conversations', 'Advanced Business Lessons', 'Priority Support', 'Ad-free Experience'].map(feature => (
-                    <li key={feature} className="flex items-center gap-3 text-sm font-medium">
-                      <CheckCircle2 size={18} className="text-secondary" />
-                      {feature}
-                    </li>
-                  ))}
-                </ul>
-                <button 
-                  onClick={handleUpgrade}
-                  disabled={user.isPro}
-                  className="w-full py-4 bg-primary text-white rounded-2xl font-bold shadow-lg shadow-primary/30 hover:scale-[1.02] active:scale-95 transition-all disabled:opacity-50"
-                >
-                  {user.isPro ? "Already Pro" : "Upgrade Now"}
-                </button>
-              </div>
-            </motion.div>
-          )}
           {view === 'roleplay' && (
             <motion.div
               key="roleplay"
@@ -624,6 +339,7 @@ function App() {
                   onClick={() => {
                     tutorService.disconnect();
                     setIsTutorActive(false);
+                    setSelectedRolePlay(null);
                     setView('dashboard');
                   }}
                   className="p-2 hover:bg-slate-200 rounded-full transition-colors"
@@ -787,26 +503,8 @@ function App() {
 
       {/* Navigation Bar */}
       <nav className="fixed bottom-0 left-0 right-0 glass border-t border-slate-200 px-8 py-4 flex justify-around items-center">
-        {/* ... */}
+        {/* placeholder */}
       </nav>
-
-      {/* Global Error Toast */}
-      <AnimatePresence>
-        {globalError && (
-          <motion.div
-            initial={{ opacity: 0, y: 50 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: 50 }}
-            className="fixed bottom-24 left-6 right-6 bg-red-600 text-white p-4 rounded-2xl shadow-xl flex items-center gap-3 z-50"
-          >
-            <AlertCircle size={20} />
-            <p className="text-sm font-medium flex-1">{globalError}</p>
-            <button onClick={() => setGlobalError(null)}>
-              <X size={18} />
-            </button>
-          </motion.div>
-        )}
-      </AnimatePresence>
     </div>
   );
 }
